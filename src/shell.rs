@@ -1,16 +1,19 @@
 use std::{
+    ffi::CString,
     io::{self, Write},
-    os::fd::AsFd,
+    os::{fd::AsFd, raw::c_void},
     println,
 };
 
 use nix::{
     errno::Errno,
+    libc,
     poll::{PollFd, PollFlags, PollTimeout, poll},
     sys::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
+    unistd::{ForkResult, Pid, execvp, fork, setpgid},
 };
 
 use crate::{
@@ -45,9 +48,68 @@ impl Shell {
 
         match command.kind() {
             CommandKind::Quit => Ok(true),
-            CommandKind::Jobs | CommandKind::Bg | CommandKind::Fg | CommandKind::External => {
-                println!("implement command execution next");
-                Ok(true)
+            CommandKind::External => {
+                self.spawn_external(&command, line)?;
+                Ok(false)
+            }
+            CommandKind::Jobs | CommandKind::Bg | CommandKind::Fg => {
+                println!("builtin not implemented yet");
+                Ok(false)
+            }
+        }
+    }
+
+    fn spawn_external(&mut self, command: &ParsedCommand, cli: &str) -> anyhow::Result<()> {
+        let argv = command
+            .argv()
+            .iter()
+            .map(|arg| CString::new(arg.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prog = &argv[0];
+        let background = command.is_background();
+
+        let exec_error = format!("{}: Command not found\n", command.argv()[0]);
+        match unsafe { fork()? } {
+            ForkResult::Child => {
+                if setpgid(Pid::from_raw(0), Pid::from_raw(0)).is_err() {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+
+                if self.signals.restore_mask_in_child().is_err() {
+                    unsafe {
+                        libc::_exit(1);
+                    }
+                }
+
+                let _ = execvp(prog, &argv);
+                unsafe {
+                    libc::write(
+                        libc::STDOUT_FILENO,
+                        exec_error.as_ptr() as *const c_void,
+                        exec_error.len(),
+                    );
+                    libc::_exit(127);
+                }
+            }
+            ForkResult::Parent { child } => {
+                match setpgid(child, child) {
+                    Ok(()) | Err(Errno::EACCES) | Err(Errno::ESRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let state = if background {
+                    JobState::Background
+                } else {
+                    JobState::Foreground
+                };
+                let job = self.jobs.add(child, child, state, cli.to_owned())?;
+                if background {
+                    println!("[{}] ({}) {}", job.jid, job.pid, cli.trim_end_matches('\n'));
+                    Ok(())
+                } else {
+                    self.wait_foreground()
+                }
             }
         }
     }
@@ -156,5 +218,16 @@ impl Shell {
                 return Ok(());
             }
         }
+    }
+
+    fn wait_foreground(&mut self) -> anyhow::Result<()> {
+        while self.jobs.foreground_pgid().is_some() {
+            {
+                let mut fds = [PollFd::new(self.signals.as_fd(), PollFlags::POLLIN)];
+                poll(&mut fds, PollTimeout::NONE)?;
+            }
+            self.drain_signals()?;
+        }
+        Ok(())
     }
 }

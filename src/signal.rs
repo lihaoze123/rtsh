@@ -7,7 +7,7 @@ use nix::sys::{
 
 pub struct SignalSource {
     fd: SignalFd,
-    mask: SigSet,
+    original_mask: SigSet,
 }
 
 impl SignalSource {
@@ -18,10 +18,9 @@ impl SignalSource {
         mask.add(Signal::SIGTSTP);
         mask.add(Signal::SIGQUIT);
 
-        mask.thread_block()?;
-
+        let original_mask = mask.thread_swap_mask(nix::sys::signal::SigmaskHow::SIG_BLOCK)?;
         let fd = SignalFd::with_flags(&mask, SfdFlags::SFD_CLOEXEC | SfdFlags::SFD_NONBLOCK)?;
-        Ok(Self { fd, mask })
+        Ok(Self { fd, original_mask })
     }
 
     pub fn as_fd(&self) -> BorrowedFd<'_> {
@@ -29,13 +28,13 @@ impl SignalSource {
     }
 
     pub fn next_signal(&self) -> nix::Result<Option<Signal>> {
-        let Some(info) = self.fd.read_signal()? else {
-            return Ok(None);
-        };
-        Ok(Signal::try_from(info.ssi_signo as i32).ok())
+        self.fd
+            .read_signal()?
+            .map(|info| Signal::try_from(info.ssi_signo as i32))
+            .transpose()
     }
 
-    pub fn unblock_in_child(&self) -> nix::Result<()> {
-        self.mask.thread_unblock()
+    pub fn restore_mask_in_child(&self) -> nix::Result<()> {
+        self.original_mask.thread_set_mask()
     }
 }

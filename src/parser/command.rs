@@ -31,6 +31,14 @@ impl ParsedCommand {
     pub fn kind(&self) -> CommandKind {
         self.kind
     }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+
+    pub fn is_background(&self) -> bool {
+        self.background
+    }
 }
 
 impl FromStr for ParsedCommand {

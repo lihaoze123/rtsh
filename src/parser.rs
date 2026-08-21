@@ -6,16 +6,13 @@ pub enum CommandKind {
     Jobs,
     Bg,
     Fg,
-    Executable,
+    External,
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseCommandError {
     #[error("command string is empty!")]
     EmptyCommand,
-
-    #[error("unknown command")]
-    UnknownCommand,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,21 +23,6 @@ pub struct ParsedCommand {
 }
 
 impl ParsedCommand {
-    pub fn new(argv: Vec<String>, background: bool, raw: String) -> Self {
-        let kind = match argv[0].as_str() {
-            "quit" => CommandKind::Quit,
-            "jobs" => CommandKind::Jobs,
-            "bg" => CommandKind::Bg,
-            "fg" => CommandKind::Fg,
-            _ => CommandKind::Executable,
-        };
-        Self {
-            argv,
-            background,
-            kind,
-        }
-    }
-
     pub fn kind(&self) -> CommandKind {
         self.kind
     }
@@ -50,23 +32,30 @@ impl FromStr for ParsedCommand {
     type Err = ParseCommandError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let raw = s.trim().to_owned();
-        let mut split = raw.split_ascii_whitespace();
-
-        let mut argv: Vec<String> = Vec::new();
-        let mut background = false;
-        while let Some(arg) = split.next() {
-            if arg == "&" {
-                background = true;
-                break;
-            }
-            argv.push(arg.to_string());
-        }
+        let mut argv: Vec<String> = raw.split_ascii_whitespace().map(str::to_owned).collect();
 
         if argv.is_empty() {
             return Err(ParseCommandError::EmptyCommand);
         }
 
-        Ok(ParsedCommand::new(argv, background, raw))
+        let background = argv.last().is_some_and(|last| last == "&");
+        if background {
+            argv.pop();
+        }
+
+        let kind = match argv[0].as_str() {
+            "quit" => CommandKind::Quit,
+            "jobs" => CommandKind::Jobs,
+            "bg" => CommandKind::Bg,
+            "fg" => CommandKind::Fg,
+            _ => CommandKind::External,
+        };
+
+        Ok(ParsedCommand {
+            argv,
+            background,
+            kind,
+        })
     }
 }
 
@@ -83,14 +72,12 @@ mod test {
         assert_eq!(
             parsed_cmd,
             ParsedCommand {
-                argv: vec![
-                    "/usr/bin/env".to_owned(),
-                    "ls".to_owned(),
-                    "-l".to_owned(),
-                    "-d".to_owned()
-                ],
+                argv: vec!["/usr/bin/env", "ls", "-l", "-d"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
                 background: true,
-                kind: CommandKind::Executable,
+                kind: CommandKind::External,
             }
         )
     }

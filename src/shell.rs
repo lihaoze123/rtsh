@@ -17,7 +17,7 @@ use nix::{
 };
 
 use crate::{
-    jobs::{JobState, JobTable},
+    jobs::{Job, JobState, JobTable},
     parser::{CommandKind, ParseCommandError, ParsedCommand},
     signal::SignalSource,
 };
@@ -71,8 +71,16 @@ impl Shell {
                 self.spawn_external(&command, line)?;
                 Ok(false)
             }
-            CommandKind::Jobs | CommandKind::Bg | CommandKind::Fg => {
-                println!("builtin not implemented yet");
+            CommandKind::Jobs => {
+                self.list_jobs();
+                Ok(false)
+            }
+            CommandKind::Bg => {
+                self.run_background(&command)?;
+                Ok(false)
+            }
+            CommandKind::Fg => {
+                self.run_foreground(&command)?;
                 Ok(false)
             }
         }
@@ -261,5 +269,92 @@ impl Shell {
             self.drain_signals()?;
         }
         Ok(())
+    }
+
+    fn list_jobs(&self) {
+        for job in self.jobs.iter() {
+            println!(
+                "[{}] ({}) {} {}",
+                job.jid,
+                job.pid,
+                job.state.display_name(),
+                job.cli.trim_end_matches('\n'),
+            );
+        }
+    }
+
+    fn find_job(&mut self, command_name: &str, argument: &str) -> Option<&mut Job> {
+        if let Some(raw_jid) = argument.strip_prefix('%') {
+            let jid = match raw_jid.parse::<u32>() {
+                Ok(jid) if jid > 0 => jid,
+                _ => {
+                    println!("{command_name}: argument must be a PID or %jobid");
+                    return None;
+                }
+            };
+
+            match self.jobs.get_mut_by_jid(jid) {
+                Some(job) => Some(job),
+                None => {
+                    println!("{argument}: No such job");
+                    None
+                }
+            }
+        } else {
+            let raw_pid = match argument.parse::<i32>() {
+                Ok(pid) if pid > 0 => pid,
+                _ => {
+                    println!("{command_name}: argument must be a PID or %jobid");
+                    return None;
+                }
+            };
+
+            let pid = Pid::from_raw(raw_pid);
+            match self.jobs.get_mut_by_pid(pid) {
+                Some(job) => Some(job),
+                None => {
+                    println!("({argument}): No such process");
+                    None
+                }
+            }
+        }
+    }
+
+    fn run_background(&mut self, command: &ParsedCommand) -> anyhow::Result<()> {
+        let Some(argument) = command.argv().get(1) else {
+            println!("bg command requires PID or %jobid argument");
+            return Ok(());
+        };
+
+        let Some(job) = self.find_job("bg", argument) else {
+            return Ok(());
+        };
+
+        nix::sys::signal::killpg(job.pgid, Signal::SIGCONT)?;
+        job.state = JobState::Background;
+
+        println!(
+            "[{}] ({}) {}",
+            job.jid,
+            job.pid,
+            job.cli.trim_end_matches('\n'),
+        );
+        Ok(())
+    }
+
+    fn run_foreground(&mut self, command: &ParsedCommand) -> anyhow::Result<()> {
+        let Some(argument) = command.argv().get(1) else {
+            println!("fg command requires PID or %jobid argument");
+            return Ok(());
+        };
+
+        let Some(job) = self.find_job("fg", argument) else {
+            return Ok(());
+        };
+
+        nix::sys::signal::killpg(job.pgid, Signal::SIGCONT)?;
+        job.state = JobState::Foreground;
+
+        self.wait_foreground()
     }
 }

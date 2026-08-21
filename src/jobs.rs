@@ -9,6 +9,16 @@ pub enum JobState {
     Stopped,
 }
 
+impl JobState {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Foreground => "Foreground",
+            Self::Background => "Running",
+            Self::Stopped => "Stopped",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Job {
     pub jid: u32,
@@ -88,5 +98,17 @@ impl JobTable {
             }
         }
         anyhow::bail!("no available jid")
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Job> {
+        self.jobs.iter()
+    }
+
+    pub fn get_mut_by_jid(&mut self, jid: u32) -> Option<&mut Job> {
+        self.jobs.iter_mut().find(|job| job.jid == jid)
+    }
+
+    pub fn get_mut_by_pid(&mut self, pid: Pid) -> Option<&mut Job> {
+        self.jobs.iter_mut().find(|job| job.pid == pid)
     }
 }

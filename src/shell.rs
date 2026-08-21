@@ -13,7 +13,7 @@ use nix::{
         signal::Signal,
         wait::{WaitPidFlag, WaitStatus, waitpid},
     },
-    unistd::{ForkResult, Pid, execvp, fork, setpgid},
+    unistd::{ForkResult, Pid, execvp, fork, read, setpgid},
 };
 
 use crate::{
@@ -21,6 +21,25 @@ use crate::{
     parser::{CommandKind, ParseCommandError, ParsedCommand},
     signal::SignalSource,
 };
+
+#[derive(Default)]
+struct InputBuffer {
+    bytes: Vec<u8>,
+    eof: bool,
+}
+
+impl InputBuffer {
+    fn take_line(&mut self) -> anyhow::Result<Option<String>> {
+        let end = match self.bytes.iter().position(|&byte| byte == b'\n') {
+            Some(index) => index + 1,
+            None if self.eof && !self.bytes.is_empty() => self.bytes.len(),
+            None => return Ok(None),
+        };
+        let line = self.bytes.drain(..end).collect::<Vec<_>>();
+        Ok(Some(String::from_utf8(line)?))
+    }
+}
+
 pub struct Shell {
     signals: SignalSource,
     jobs: JobTable,
@@ -176,6 +195,7 @@ impl Shell {
 
     pub fn run(&mut self, emit_prompt: bool) -> anyhow::Result<()> {
         let stdin = io::stdin();
+        let mut input = InputBuffer::default();
 
         loop {
             if emit_prompt {
@@ -184,6 +204,14 @@ impl Shell {
             }
 
             let line = loop {
+                if let Some(line) = input.take_line()? {
+                    break line;
+                }
+
+                if input.eof {
+                    return Ok(());
+                }
+
                 let (stdin_ready, signal_ready) = {
                     let mut fds = [
                         PollFd::new(stdin.as_fd(), PollFlags::POLLIN | PollFlags::POLLHUP),
@@ -206,11 +234,15 @@ impl Shell {
                 }
 
                 if stdin_ready {
-                    let mut line = String::new();
-                    if stdin.read_line(&mut line)? == 0 {
-                        return Ok(());
+                    let mut chunk = [0u8; 4096];
+                    match read(stdin.as_fd(), &mut chunk) {
+                        Ok(0) => input.eof = true,
+                        Ok(count) => {
+                            input.bytes.extend_from_slice(&chunk[..count]);
+                        }
+                        Err(Errno::EINTR | Errno::EAGAIN) => {}
+                        Err(error) => return Err(error.into()),
                     }
-                    break line;
                 }
             };
 
